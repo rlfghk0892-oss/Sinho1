@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>주행조사 웹앱 (GPS 기록·지체율·재생)</title>
+<link
+  rel="stylesheet"
+  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+/>
+<style>
+  :root {
+    --panel-w: 360px;
+  }
+  html, body { height: 100%; margin: 0; }
+  #app { display: flex; height: 100%; width: 100%; }
+  #panel {
+    width: var(--panel-w);
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 12px 14px;
+    border-right: 1px solid #e5e7eb;
+    overflow-y: auto;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Apple SD Gothic Neo, Noto Sans KR, sans-serif;
+  }
+  #map { flex: 1; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  .sub { color: #6b7280; font-size: 12px; margin-bottom: 10px; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
+  .row label { font-size: 13px; color: #374151; min-width: 110px; }
+  .row input, .row select {
+    padding: 6px 8px; font-size: 14px; border: 1px solid #d1d5db; border-radius: 6px; flex: 1 1 auto; min-width: 80px;
+  }
+  .btn {
+    padding: 8px 10px; font-size: 14px; border: 1px solid #d1d5db; border-radius: 8px; background: #fff; cursor: pointer;
+  }
+  .btn.primary { background: #111827; color: #fff; border-color: #111827; }
+  .btn.warn { background: #b91c1c; color: #fff; border-color: #b91c1c; }
+  .btn.ghost { background: #f3f4f6; }
+  .section { margin: 12px 0; padding-top: 6px; border-top: 1px dashed #e5e7eb; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px; }
+  .stat b { display: block; font-size: 20px; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: right; }
+  th { background: #f9fafb; position: sticky; top: 0; z-index: 1; }
+  td:first-child, th:first-child, td:nth-child(2), th:nth-child(2) { text-align: left; }
+  .list { display: grid; gap: 6px; }
+  .item {
+    border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px; background: #fff; display: flex; justify-content: space-between; align-items: center;
+  }
+  .item small { color: #6b7280; display: block; }
+  .muted { color: #6b7280; font-size: 12px; }
+  .note { font-size: 12px; color: #6b7280; }
+  .row .help { font-size: 12px; color: #6b7280; flex-basis: 100%; }
+  .sticky-actions { position: sticky; bottom: 0; background: #fff; padding: 8px 0; border-top: 1px solid #e5e7eb; display: flex; gap: 8px; }
+  @media (max-width: 860px) {
+    #panel { width: 100%; max-width: none; }
+    #app { flex-direction: column; }
+    #map { height: 60vh; }
+    .sticky-actions { position: static; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="panel">
+    <h1>주행조사 웹앱</h1>
+    <div class="sub">GPS로 이동경로/속도를 기록하고, 저장 후 차 아이콘으로 재생합니다.</div>
+
+    <div class="section">
+      <h3>실시간 기록</h3>
+      <div class="row">
+        <button id="btnStart" class="btn primary">기록 시작</button>
+        <button id="btnStop" class="btn warn" disabled>기록 종료</button>
+        <button id="btnCenter" class="btn ghost">지도 현재위치</button>
+      </div>
+      <div class="grid2">
+        <div class="stat">
+          총거리(km)
+          <b id="statDist">0.000</b>
+        </div>
+        <div class="stat">
+          총시간
+          <b id="statTime">00:00:00</b>
+        </div>
+        <div class="stat">
+          평균속도(km/h)
+          <b id="statAvg">0.0</b>
+        </div>
+        <div class="stat">
+          지체지수(TTI)
+          <b id="statTTI">1.00</b>
+        </div>
+      </div>
+
+      <div class="row">
+        <label>샘플링 간격(ms)</label>
+        <input type="number" id="optInterval" value="1000" min="250" step="250">
+      </div>
+      <div class="row">
+        <label>고정 구간길이(m)</label>
+        <input type="number" id="optSegLen" value="100" min="20" step="10">
+      </div>
+      <div class="row">
+        <label>기준속도(km/h)</label>
+        <input type="number" id="optFreeKmh" value="60" min="5" step="5">
+        <div class="help">지체율 계산에 사용됩니다. 도로종별/시간대에 맞게 조정하세요.</div>
+      </div>
+      <div class="row">
+        <label>속도 컬러 범위 (km/h)</label>
+        <input type="number" id="optVmin" value="10" step="5" min="0">
+        <input type="number" id="optVmax" value="70" step="5" min="5">
+      </div>
+
+      <div class="row">
+        <button id="btnSave" class="btn" disabled>현재 기록 저장</button>
+        <input type="text" id="saveName" placeholder="저장 이름(미입력 시 자동)">
+      </div>
+      <div class="row">
+        <button id="btnExport" class="btn" disabled>JSON 내보내기</button>
+        <label class="btn">
+          JSON 불러오기
+          <input id="fileImport" type="file" accept="application/json" hidden />
+        </label>
+      </div>
+      <div class="note">안내: 브라우저 권한 허용 및 HTTPS에서 사용하세요. 장시간 백그라운드에서는 기록이 중단될 수 있습니다.</div>
+    </div>
+
+    <div class="section">
+      <h3>구간별 지표</h3>
+      <div style="max-height: 220px; overflow:auto; border:1px solid #e5e7eb; border-radius:8px">
+        <table id="segTable">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>거리(m)</th>
+              <th>시간(s)</th>
+              <th>속도(km/h)</th>
+              <th>Delay(%)</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>저장된 주행</h3>
+      <div class="list" id="runList"></div>
+    </div>
+
+    <div class="section">
+      <h3>재생</h3>
+      <div class="row">
+        <label>배속</label>
+        <select id="replayRate">
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="2">2x</option>
+          <option value="4">4x</option>
+          <option value="8">8x</option>
+        </select>
+        <button id="btnReplay" class="btn" disabled>재생</button>
+        <button id="btnStopReplay" class="btn ghost" disabled>정지</button>
+      </div>
+      <div class="muted">저장 목록에서 하나를 선택하면 재생 가능</div>
+    </div>
+
+    <div class="sticky-actions">
+      <button id="btnClearMap" class="btn ghost">지도 지우기</button>
+      <button id="btnDeleteAll" class="btn">모든 저장 삭제</button>
+    </div>
+  </aside>
+
+  <div id="map"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/localforage@1.10.0/dist/localforage.min.js"></script>
+<script>
+/** ---------- 유틸 ---------- */
+const fmtTime = (sec) => {
+  sec = Math.max(0, Math.round(sec));
+  const h = String(Math.floor(sec/3600)).padStart(2,'0');
+  const m = String(Math.floor((sec%3600)/60)).padStart(2,'0');
+  const s = String(sec%60).padStart(2,'0');
+  return `${h}:${m}:${s}`;
+};
+const haversine = (a, b) => {
+  const R = 6371000; // m
+  const toRad = d => d * Math.PI/180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+  const sinDLat = Math.sin(dLat/2), sinDLng = Math.sin(dLng/2);
+  const h = sinDLat*sinDLat + Math.cos(lat1)*Math.cos(lat2)*sinDLng*sinDLng;
+  return 2*R*Math.asin(Math.sqrt(h));
+};
+const nowIso = () => new Date().toISOString().replace('T',' ').slice(0,19);
+const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+function speedToColor(v, vmin, vmax) {
+  // v(km/h) -> 0(red) ... 1(blue)
+  const t = clamp((v - vmin) / Math.max(1,(vmax - vmin)), 0, 1);
+  const r = Math.round(255 * (1 - t));
+  const g = Math.round(64  * (1 - t));
+  const b = Math.round(255 * (t));
+  return `rgb(${r},${g},${b})`;
+}
+
+/** ---------- 지도 ---------- */
+const map = L.map('map', { zoomControl: true });
+const tiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 20,
+  attribution: '&copy; OpenStreetMap'
+}).addTo(map);
+map.setView([37.4979, 127.0276], 15); // 강남역 주변 기본
+
+// 현재 위치 마커
+const curMarker = L.circleMarker([0,0], {
+  radius: 6, color: '#111827', weight: 2, fillColor: '#60a5fa', fillOpacity: 0.9
+}).addTo(map);
+
+// 실시간 경로 레이어 그룹
+const liveLayer = L.layerGroup().addTo(map);
+// 재생 레이어 그룹
+const replayLayer = L.layerGroup().addTo(map);
+
+/** ---------- 상태 ---------- */
+let watchId = null;
+let samples = []; // {lat,lng,ts(ms),acc(m),spdKmh}
+let segs = [];    // {distM, timeS, spdKmh, delayPct}
+let liveLines = [];
+let startedAt = null;
+
+let replay = { active:false, points:[], t0:0, idx:0, rate:1, marker:null, lastFrame:0, cum:[] };
+
+/** ---------- 스토리지 ---------- */
+localforage.config({ name: 'driving-survey', storeName: 'runs' });
+
+async function listRuns() {
+  const keys = await localforage.keys();
+  const items = [];
+  for (const k of keys) {
+    const v = await localforage.getItem(k);
+    if (v && v.meta) items.push({ id:k, ...v.meta });
+  }
+  items.sort((a,b)=>b.ts - a.ts);
+  renderRunList(items);
+}
+function renderRunList(items) {
+  const host = document.getElementById('runList');
+  host.innerHTML = '';
+  if (!items.length) {
+    host.innerHTML = '<div class="muted">저장된 주행이 없습니다.</div>';
+    return;
+  }
+  for (const it of items) {
+    const div = document.createElement('div');
+    div.className = 'item';
+    const left = document.createElement('div');
+    left.innerHTML = `<b>${it.name}</b><small>${new Date(it.ts).toLocaleString()} · ${it.count} pts · ${ (it.dist/1000).toFixed(2)} km</small>`;
+    const right = document.createElement('div');
+    const btnView = document.createElement('button');
+    btnView.className = 'btn';
+    btnView.textContent = '불러와 보기';
+    btnView.onclick = async () => {
+      const data = await localforage.getItem(it.id);
+      loadForReplay(data);
+    };
+    const btnDel = document.createElement('button');
+    btnDel.className = 'btn ghost';
+    btnDel.textContent = '삭제';
+    btnDel.onclick = async () => {
+      if (confirm('삭제하시겠습니까?')) {
+        await localforage.removeItem(it.id);
+        listRuns();
+      }
+    };
+    right.appendChild(btnView);
+    right.appendChild(btnDel);
+    div.appendChild(left);
+    div.appendChild(right);
+    host.appendChild(div);
+  }
+}
+
+/** ---------- 실시간 기록 ---------- */
+function resetLive() {
+  samples = [];
+  segs = [];
+  startedAt = null;
+  liveLayer.clearLayers();
+  liveLines = [];
+  updateStats();
+  renderSegTable();
+  document.getElementById('btnSave').disabled = true;
+  document.getElementById('btnExport').disabled = true;
+}
+resetLive();
+
+function startWatch() {
+  if (!navigator.geolocation) {
+    alert('이 브라우저는 위치기록을 지원하지 않습니다.');
+    return;
+  }
+  const interval = parseInt(optInterval.value || '1000', 10);
+  const opts = { enableHighAccuracy: true, maximumAge: 0, timeout: Math.max(10000, interval*2) };
+  startedAt = Date.now();
+  // 샘플링 타이머: 고정 간격으로 getCurrentPosition 호출 (watchPosition은 일부 단말에서 드랍/버퍼 현상)
+  // 보정: 연속 구간 계산은 ts를 기준으로 처리
+  const timer = setInterval(() => {
+    navigator.geolocation.getCurrentPosition(onPos, err => console.warn(err), opts);
+  }, interval);
+  // watchId 대용으로 타이머 id를 저장
+  watchId = { kind:'timer', id: timer };
+  btnStart.disabled = true;
+  btnStop.disabled = false;
+}
+
+function stopWatch() {
+  if (watchId) {
+    if (watchId.kind === 'timer') clearInterval(watchId.id);
+    watchId = null;
+  }
+  btnStart.disabled = false;
+  btnStop.disabled = true;
+  if (samples.length >= 2) {
+    document.getElementById('btnSave').disabled = false;
+    document.getElementById('btnExport').disabled = false;
+  }
+}
+
+function onPos(pos) {
+  const { latitude, longitude, accuracy, speed } = pos.coords;
+  const ts = pos.timestamp; // ms
+  const pt = { lat: latitude, lng: longitude, acc: accuracy ?? null, ts, spdKmh: null };
+  // 속도: 브라우저 제공값(m/s) 있으면 우선, 없으면 거리/시간으로 계산
+  if (typeof speed === 'number' && !Number.isNaN(speed)) {
+    pt.spdKmh = Math.max(0, speed) * 3.6;
+  } else if (samples.length) {
+    const prev = samples[samples.length - 1];
+    const dt = (pt.ts - prev.ts) / 1000; // s
+    const d = haversine(prev, pt); // m
+    if (dt > 0 && d >= 0.5) pt.spdKmh = (d / dt) * 3.6;
+  }
+  samples.push(pt);
+  curMarker.setLatLng([pt.lat, pt.lng]);
+  if (samples.length === 1) map.setView([pt.lat, pt.lng], 17);
+  drawLiveIncrement();
+  recalcSegmentsAndStats();
+}
+
+function drawLiveIncrement() {
+  const n = samples.length;
+  if (n < 2) return;
+  const p1 = samples[n-2], p2 = samples[n-1];
+  const vmin = parseFloat(optVmin.value || '10');
+  const vmax = parseFloat(optVmax.value || '70');
+  const spd = p2.spdKmh ?? p1.spdKmh ?? 0;
+  const color = speedToColor(spd, vmin, vmax);
+  const line = L.polyline([[p1.lat,p1.lng],[p2.lat,p2.lng]], { color, weight: 5, opacity: 0.9 });
+  liveLayer.addLayer(line);
+  liveLines.push(line);
+}
+
+function recalcSegmentsAndStats() {
+  const segLen = parseFloat(optSegLen.value || '100');
+  const freeKmh = parseFloat(optFreeKmh.value || '60');
+  segs = segmentize(samples, segLen, freeKmh);
+  renderSegTable();
+
+  // 전체 지표
+  let dist = 0, dur = 0;
+  for (let i=1;i<samples.length;i++) {
+    const d = haversine(samples[i-1], samples[i]);
+    dist += d;
+    dur += Math.max(0, (samples[i].ts - samples[i-1].ts)/1000);
+  }
+  const avg = dur>0 ? (dist/1000) / (dur/3600) : 0;
+  // 전체 TTI = 총실행시간 / 총자유시간
+  const freeTime = (dist/1000) / Math.max(5, freeKmh) * 3600; // s
+  const tti = freeTime>0 ? (dur / freeTime) : 1;
+
+  document.getElementById('statDist').textContent = (dist/1000).toFixed(3);
+  document.getElementById('statTime').textContent = fmtTime(dur);
+  document.getElementById('statAvg').textContent = avg.toFixed(1);
+  document.getElementById('statTTI').textContent = tti.toFixed(2);
+}
+
+function segmentize(points, segLen, freeKmh) {
+  const out = [];
+  if (points.length < 2) return out;
+  const freeMs = freeKmh * 1000 / 3600; // m/s
+  let accDist = 0, accTime = 0, startIdx = 0;
+
+  for (let i=1;i<points.length;i++) {
+    const a = points[i-1], b = points[i];
+    const d = haversine(a,b);
+    const t = Math.max(0,(b.ts - a.ts)/1000);
+    accDist += d; accTime += t;
+
+    if (accDist >= segLen) {
+      const spd = accTime>0 ? (accDist/accTime)*3.6 : 0;
+      const freeT = accDist / Math.max(0.1, freeMs);
+      const delayPct = Math.max(0, (accTime / freeT - 1) * 100);
+      out.push({ distM: accDist, timeS: accTime, spdKmh: spd, delayPct });
+      accDist = 0; accTime = 0; startIdx = i;
+    }
+  }
+  return out;
+}
+
+function renderSegTable() {
+  const tb = document.querySelector('#segTable tbody');
+  tb.innerHTML = '';
+  segs.forEach((s, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${i+1}</td>
+      <td>${s.distM.toFixed(0)}</td>
+      <td>${s.timeS.toFixed(1)}</td>
+      <td>${s.spdKmh.toFixed(1)}</td>
+      <td>${s.delayPct.toFixed(1)}</td>
+    `;
+    tb.appendChild(tr);
+  });
+}
+
+/** ---------- 저장 / 불러오기 ---------- */
+async function saveCurrent() {
+  if (samples.length < 2) { alert('기록 데이터가 없습니다.'); return; }
+  const meta = summarize(samples);
+  const name = (document.getElementById('saveName').value || '').trim() || `주행 ${nowIso()}`;
+  meta.name = name;
+  const payload = {
+    meta,
+    opts: {
+      interval: parseInt(optInterval.value||'1000',10),
+      segLen: parseFloat(optSegLen.value||'100'),
+      freeKmh: parseFloat(optFreeKmh.value||'60'),
+      vmin: parseFloat(optVmin.value||'10'),
+      vmax: parseFloat(optVmax.value||'70'),
+    },
+    points: samples
+  };
+  const id = `run_${Date.now()}`;
+  await localforage.setItem(id, payload);
+  await listRuns();
+  alert('저장되었습니다.');
+}
+
+function summarize(points) {
+  let dist=0, dur=0;
+  for (let i=1;i<points.length;i++) {
+    dist += haversine(points[i-1], points[i]);
+    dur += Math.max(0,(points[i].ts - points[i-1].ts)/1000);
+  }
+  return { ts: Date.now(), name: '', count: points.length, dist };
+}
+
+function exportCurrent() {
+  const data = {
+    meta: summarize(samples),
+    opts: {
+      interval: parseInt(optInterval.value||'1000',10),
+      segLen: parseFloat(optSegLen.value||'100'),
+      freeKmh: parseFloat(optFreeKmh.value||'60'),
+      vmin: parseFloat(optVmin.value||'10'),
+      vmax: parseFloat(optVmax.value||'70'),
+    },
+    points: samples
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `driving_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+document.getElementById('fileImport').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const text = await f.text();
+  try {
+    const data = JSON.parse(text);
+    loadForReplay(data);
+  } catch(e) {
+    alert('JSON 파싱 오류');
+  } finally {
+    e.target.value = '';
+  }
+});
+
+/** ---------- 재생 ---------- */
+function loadForReplay(data) {
+  stopReplay();
+  replayLayer.clearLayers();
+  const pts = (data.points || []).map(p => ({ lat:p.lat, lng:p.lng, ts:p.ts }));
+  if (pts.length < 2) { alert('재생할 데이터가 부족합니다.'); return; }
+
+  // 지도 경로와 마커
+  const latlngs = pts.map(p=>[p.lat,p.lng]);
+  const line = L.polyline(latlngs, { color:'#111827', weight:4, opacity:0.6 }).addTo(replayLayer);
+  const carIcon = L.divIcon({
+    html:'🚗', className:'', iconSize:[24,24], iconAnchor:[12,12]
+  });
+  const m = L.marker(latlngs[0], { icon: carIcon }).addTo(replayLayer);
+  map.fitBounds(line.getBounds(), { padding:[30,30] });
+
+  // 누적 시간표
+  const cum = [0];
+  for (let i=1;i<pts.length;i++) {
+    const dt = Math.max(0, (pts[i].ts - pts[i-1].ts)/1000);
+    cum.push(cum[i-1] + dt);
+  }
+
+  replay.points = pts;
+  replay.marker = m;
+  replay.cum = cum;
+  replay.idx = 0;
+
+  document.getElementById('btnReplay').disabled = false;
+  document.getElementById('btnStopReplay').disabled = false;
+}
+
+function startReplay() {
+  if (!replay.points.length) return;
+  replay.active = true;
+  replay.rate = parseFloat(document.getElementById('replayRate').value || '1');
+  replay.t0 = performance.now();
+  replay.lastFrame = replay.t0;
+  requestAnimationFrame(stepReplay);
+}
+
+function stopReplay() {
+  replay.active = false;
+  replay.points = [];
+  replay.cum = [];
+  replay.idx = 0;
+  if (replay.marker) replayLayer.clearLayers();
+  document.getElementById('btnReplay').disabled = true;
+  document.getElementById('btnStopReplay').disabled = true;
+}
+
+function stepReplay(t) {
+  if (!replay.active) return;
+  const elapsedReal = (t - replay.t0)/1000; // s
+  const simT = elapsedReal * replay.rate;
+
+  const totalT = replay.cum[replay.cum.length-1];
+  if (simT >= totalT) {
+    // 끝 위치로 이동 후 종료
+    const last = replay.points[replay.points.length-1];
+    replay.marker.setLatLng([last.lat,last.lng]);
+    replay.active = false;
+    return;
+  }
+  // simT가 포함되는 구간 탐색
+  let i = replay.idx;
+  while (i < replay.cum.length-1 && replay.cum[i+1] < simT) i++;
+  replay.idx = i;
+
+  const t0 = replay.cum[i];
+  const t1 = replay.cum[i+1];
+  const a = replay.points[i], b = replay.points[i+1];
+  const ratio = (simT - t0) / Math.max(0.001, (t1 - t0));
+  const lat = a.lat + (b.lat - a.lat) * ratio;
+  const lng = a.lng + (b.lng - a.lng) * ratio;
+  replay.marker.setLatLng([lat,lng]);
+
+  requestAnimationFrame(stepReplay);
+}
+
+/** ---------- 이벤트 바인딩 ---------- */
+const btnStart = document.getElementById('btnStart');
+const btnStop = document.getElementById('btnStop');
+const btnCenter = document.getElementById('btnCenter');
+const btnSave = document.getElementById('btnSave');
+const btnExport = document.getElementById('btnExport');
+const btnReplay = document.getElementById('btnReplay');
+const btnStopReplay = document.getElementById('btnStopReplay');
+const btnClearMap = document.getElementById('btnClearMap');
+const btnDeleteAll = document.getElementById('btnDeleteAll');
+
+const optInterval = document.getElementById('optInterval');
+const optSegLen = document.getElementById('optSegLen');
+const optFreeKmh = document.getElementById('optFreeKmh');
+const optVmin = document.getElementById('optVmin');
+const optVmax = document.getElementById('optVmax');
+
+btnStart.onclick = startWatch;
+btnStop.onclick = stopWatch;
+btnCenter.onclick = () => {
+  if (samples.length) {
+    const p = samples[samples.length-1];
+    map.setView([p.lat,p.lng], map.getZoom() < 16 ? 17 : map.getZoom());
+  }
+};
+btnSave.onclick = saveCurrent;
+btnExport.onclick = exportCurrent;
+btnReplay.onclick = startReplay;
+btnStopReplay.onclick = stopReplay;
+
+btnClearMap.onclick = () => {
+  liveLayer.clearLayers(); replayLayer.clearLayers();
+  liveLines = [];
+};
+btnDeleteAll.onclick = async () => {
+  if (!confirm('모든 저장 데이터를 삭제하시겠습니까?')) return;
+  await localforage.clear();
+  listRuns();
+};
+
+window.addEventListener('beforeunload', () => {
+  if (watchId) stopWatch();
+});
+
+listRuns();
+</script>
+</body>
+</html>
